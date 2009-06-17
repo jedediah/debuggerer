@@ -1,6 +1,6 @@
 The Debuggerer is a Ruby debugger that can be used quickly and conveniently from within IRB.
 
-== Has this ever happened to you? ==
+== Has this ever happened to you?
 
 Tired of the elaborate ceremony required to carry out a typical debugging session?
 Would you like to be able to perform that case cracking trace with a single command?
@@ -30,20 +30,20 @@ The Debuggerer comes to the rescue:
 
   In /home/jed/proj/debuggerer/lib/program.rb:
   8          woot = @yerk
-  9          @yerk = @bobo                            		           1
-  10         @bobo += woot                            		           1
-  8          woot = @yerk                             		 
-  9          @yerk = @bobo                            		           1
-  10         @bobo += woot                            		           1
-  8          woot = @yerk                             		 
-  9          @yerk = @bobo                            		           2
-  10         @bobo += woot                            		           2
-  8          woot = @yerk                             		 
-  9          @yerk = @bobo                            		           3
-  10         @bobo += woot                            		           3
-  8          woot = @yerk                             		 
-  9          @yerk = @bobo                            		           5
-  10         @bobo += woot                            		           5
+  9          @yerk = @bobo                                           1
+  10         @bobo += woot                                           1
+  8          woot = @yerk                                  
+  9          @yerk = @bobo                                           1
+  10         @bobo += woot                                           1
+  8          woot = @yerk                                  
+  9          @yerk = @bobo                                           2
+  10         @bobo += woot                                           2
+  8          woot = @yerk                                  
+  9          @yerk = @bobo                                           3
+  10         @bobo += woot                                           3
+  8          woot = @yerk                                  
+  9          @yerk = @bobo                                           5
+  10         @bobo += woot                                           5
 
 From left to right is line number, source, and watch value. The watch
 can be any expression. It's evaluated in the context of the source line.
@@ -59,10 +59,10 @@ some expression:
   35   Debuggerer.watch_changes("@bobo") { Donk.new.foozle 5 }
   In /home/jed/proj/debuggerer/lib/program.rb:
   7        x.times {                                                 1
-	8					 woot = @yerk																						 2
-	8					 woot = @yerk																						 3
-	8					 woot = @yerk																						 5
-	8					 woot = @yerk																						 8
+	8					 woot = @yerk                                            2
+  8          woot = @yerk                                            3
+  8          woot = @yerk                                            5
+  8          woot = @yerk                                            8
 
 Or maybe you want to specify your own condition:
 
@@ -70,9 +70,9 @@ Or maybe you want to specify your own condition:
 
   In /home/jed/proj/debuggerer/lib/program.rb:
   10         @bobo += woot                                           5
-	8					 woot = @yerk																						 8
-	9					 @yerk = @bobo																					 8
-	10				 @bobo += woot																					 8
+  8          woot = @yerk                                            8
+  9          @yerk = @bobo                                           8
+  10         @bobo += woot                                           8
 
 Or maybe you just want to stop the action and check things out for yourself:
 
@@ -104,7 +104,7 @@ Once created, it can be used to step through the code or to set
 multiple breakpoints. Breakpoints can be set for file+line,
 class+method, arbitrary conditional expressions, and for exceptions.
 
-= TODO =
+== TODO
 
 This gem is currently classified as "barely usable". Planned
 enhancements include, but are not limited to:
