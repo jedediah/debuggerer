@@ -1,0 +1,117 @@
+The Debuggerer is a Ruby debugger that can be used quickly and conveniently from within IRB.
+
+== Has this ever happened to you? ==
+
+Tired of the elaborate ceremony required to carry out a typical debugging session?
+Would you like to be able to perform that case cracking trace with a single command?
+The Debuggerer does conditional traces, watches and breakpoints at the snap of a finger.
+
+Imagine you have a bug in this complex program:
+
+  class Donk
+    def initialize
+      @yerk = @bobo = 1
+    end
+
+    def foozle x
+      x.times {
+        woot = @yerk
+        @yerk = @bobo
+        @bobo += woot
+      }
+    end
+  end
+
+The Debuggerer comes to the rescue:
+
+  >> require 'debuggerer'
+
+  >> Debuggerer.watch("woot") { Donk.new.foozle 5 }
+
+  In /home/jed/proj/debuggerer/lib/program.rb:
+  8          woot = @yerk
+  9          @yerk = @bobo                            		           1
+  10         @bobo += woot                            		           1
+  8          woot = @yerk                             		 
+  9          @yerk = @bobo                            		           1
+  10         @bobo += woot                            		           1
+  8          woot = @yerk                             		 
+  9          @yerk = @bobo                            		           2
+  10         @bobo += woot                            		           2
+  8          woot = @yerk                             		 
+  9          @yerk = @bobo                            		           3
+  10         @bobo += woot                            		           3
+  8          woot = @yerk                             		 
+  9          @yerk = @bobo                            		           5
+  10         @bobo += woot                            		           5
+
+From left to right is line number, source, and watch value. The watch
+can be any expression. It's evaluated in the context of the source line.
+The trace will pull code out of source files, if possible, and even
+from the IRB history.
+
+To cut down on the noise, maybe you only want to see *changes* to
+some expression:
+
+  >> Debuggerer.watch_changes("@bobo") { Donk.new.foozle 5 }
+
+  In (irb):
+  35   Debuggerer.watch_changes("@bobo") { Donk.new.foozle 5 }
+  In /home/jed/proj/debuggerer/lib/program.rb:
+  7        x.times {                                                 1
+	8					 woot = @yerk																						 2
+	8					 woot = @yerk																						 3
+	8					 woot = @yerk																						 5
+	8					 woot = @yerk																						 8
+
+Or maybe you want to specify your own condition:
+
+  >> Debuggerer.watch_if("@bobo", "@yerk >= 5") { Donk.new.foozle 5 }
+
+  In /home/jed/proj/debuggerer/lib/program.rb:
+  10         @bobo += woot                                           5
+	8					 woot = @yerk																						 8
+	9					 @yerk = @bobo																					 8
+	10				 @bobo += woot																					 8
+
+Or maybe you just want to stop the action and check things out for yourself:
+
+  >> dbg = Debuggerer.run_to(Donk,:foozle) { Donk.new.foozle 5 }
+
+   Breakpoint call to Donk#foozle 
+
+  >> dbg.context
+  {:event=>"call", :file=>"/home/jed/proj/debuggerer/lib/program.rb",
+   :line=>6, :ident=>:foozle, :binding=>#<Binding:0x00000002032f08>,
+   :class=>Donk}
+
+  >> dbg.run_until "@yerk >= 5"
+
+   Breakpoint if @yerk >= 5 
+
+  >> dbg.context
+  {:event=>"line", :file=>"/home/jed/proj/debuggerer/lib/program.rb",
+   :line=>10, :ident=>:foozle, :binding=>#<Binding:0x00000001940d58>,
+   :class=>Donk}
+
+  >> dbg.eval "@yerk"
+  5
+
+  >> dbg.finish
+
+Internally, the debugger object runs the subject code in a +Fiber+.
+Once created, it can be used to step through the code or to set
+multiple breakpoints. Breakpoints can be set for file+line,
+class+method, arbitrary conditional expressions, and for exceptions.
+
+= TODO =
+
+This gem is currently classified as "barely usable". Planned
+enhancements include, but are not limited to:
+
+* multiple simultaneous debuggers
+* global management of all debuggers
+* more comprehensive readout info
+* restart, reverse, other interesting flow control things
+* convenient commands in global namespace and certain classes
+* general robustness and reliability
