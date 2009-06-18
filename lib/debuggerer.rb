@@ -34,6 +34,10 @@ module Debuggerer
       args.replace args[0 .. (-1-flags.size)]
       opts
     end
+
+    def errmsg msg="Generic error"
+      STDERR.puts "\e[31;1m#{msg}\e[0m"
+    end
   end
 
   class Breakpoint
@@ -123,10 +127,6 @@ module Debuggerer
   class Debugger
     include Helpers
 
-    def errmsg msg="Generic error"
-      STDERR.puts "\e[31;1m#{msg}\e[0m"
-    end
-
     def initialize &block
       @conf = {}
       @conf[:width] = (ENV['COLUMNS']||78).to_i
@@ -139,8 +139,17 @@ module Debuggerer
 
     @trace_functions ||= []
     @tracing ||= false
+    @current_debugger = nil
 
     class << self
+      def new &block
+        @current_debugger = super
+      end
+
+      def current
+        @current_debugger
+      end
+
       attr_reader :trace_functions
 
       def add_trace_func func
@@ -382,27 +391,27 @@ module Debuggerer
       run &block
     end
 
-    def ret a=nil, b=nil, &block
+    define_method :return do |a=nil, b=nil, &block|
       bpret a, b, :once
       run &block
     end
 
-    define_method :until do |pred, &block|
+    def run_until pred, &block
       bpif pred, :once
       run &block
     end
 
-    define_method :while do |pred, &block|
+    def run_while pred, &block
       bpif "!(#{pred})", :once
       run &block
     end
 
-    def to a=nil, b=nil, &block
+    def run_to a=nil, b=nil, &block
       bpat a, b, :once
       run &block
     end
 
-    def ex &block
+    def run_ex &block
       bpex :once
       run &block
     end
@@ -432,7 +441,7 @@ module Debuggerer
 
     def initialize opts={}, &block
       @conf = DEFAULTS.merge opts
-      @condition = @conf[:condition]
+      @condition = @conf[:if]
       @watch = @conf[:watch]
       @changes = !!@conf[:changes]
       @source = !!@conf[:source]
@@ -558,14 +567,25 @@ module Debuggerer
   end # class Tracer
 
   class << self
+    include Helpers
 
     def debug &block
-      Debugger.new &block
+      if block
+        Debugger.new &block
+      elsif Debugger.current
+        Debugger.current
+      else
+        errmsg "No current debugger and no block given"
+        nil
+      end
     end
 
-    [:to,:while,:until,:ex].each do |meth|
+    [:run_to,
+     :run_while,
+     :run_until,
+     :run_ex].each do |meth|
       define_method meth do |*a, &block|
-        dbg = Debugger.new &block
+        return unless dbg = debug(&block)
         dbg.send meth, *a
         dbg
       end
@@ -577,47 +597,86 @@ module Debuggerer
     end
 
     def trace_if pred, opts={}, &block
-      trace opts.merge(:condition => pred), &block
+      trace opts.augment(:if => pred), &block
+    end
+
+    def trace_in a, b=nil, *args, &block
+      opts = extract_options args
+      if a.is_a? Module
+        if b.nil?
+          opts.augment! :class => a
+        else
+          opts.augment! :class => a, :method => b
+        end
+      elsif a.is_a? Symbol
+        opts.augment! :method => a
+      elsif a.is_a?(String) || a.is_a?(Regexp)
+        if b.nil?
+          opts.augment! :file => a
+        else
+          opts.augment! :file => a, :line => b
+        end
+      elsif a.is_a?(Integer) && a > 0
+        opts.augment! :line => a
+      else
+        opts.augment! :object => a
+      end
+
+      trace opts, &block
     end
 
     def watch watch, opts={}, &block
-      trace opts.merge(:watch => watch), &block
+      trace opts.augment(:watch => watch), &block
     end
 
     def watch_if watch, pred, opts={}, &block
-      trace opts.merge(:watch => watch, :condition => pred), &block
+      trace opts.augment(:watch => watch, :if => pred), &block
     end
 
-    def watch_changes watch, opts={}, &block
-      trace opts.merge(:watch => watch, :changes => true), &block
+    def watch_in w, a, b=nil, *args, &block
+      opts = extract_options args
+      trace_in a, b, opts.augment(:watch => w), &block
     end
 
-    def install
+    def watch_changes w, opts={}, &block
+      trace opts.augment(:watch => w, :changes => true), &block
+    end
+
+    def watch_changes_in w, a, b=nil, *args, &block
+      opts = extract_options args
+      trace_in a, b, opts.augment(:watch => w, :changes => true), &block
     end
   end # class << self
 
   module ToplevelCommands
-    def run_to *a, &block
-      Debuggerer.to *a, &block
+    [:to,:while,:until,:ex].each do |m|
+      define_method "run_#{m}" do |*a, &block|
+        Debuggerer.send m, *a, &block
+      end
     end
 
-    def run_while *a, &block
-      Debuggerer.while *a, &block
-    end
-
-    def run_until *a, &block
-      Debuggerer.while *a, &block
-    end
-
-    def run_ex *a, &block
-      Debuggerer.ex *a, &block
+    [:debug,
+     :trace,
+     :trace_if,
+     :trace_in,
+     :watch,
+     :watch_if,
+     :watch_in,
+     :watch_changes,
+     :watch_changes_in].each do |m|
+      define_method m do |*a, &block|
+        Debuggerer.send m, *a, &block
+      end
     end
   end
 
   module ModuleCommands
-    def run_to *a, &block
-      Debuggerer.to self, *a, &block
+    [:run_to,:trace_in,:watch_in,:watch_changes_in].each do |m|
+      define_method m do |*a, &block|
+        Debuggerer.send m, self, *a, &block
+      end
     end
   end
+
 end # module Debuggerer
 
