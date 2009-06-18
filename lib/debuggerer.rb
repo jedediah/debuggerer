@@ -1,178 +1,308 @@
 module Debuggerer
+  module HashExt
+    # Merge only the elements of +hsh+ that are not in +self+
+    def augment hsh
+      merge(hsh) {|k,v1,v2| v1 }
+    end
+
+    def augment! hsh
+      merge!(hsh) {|k,v1,v2| v1 }
+    end
+
+    # Return a new hash containing only the elements of +self+
+    # having a key included in the arguments.
+    def filter *a
+      a.reduce({}) {|h,k| h[k] = self[k] if key? k; h }
+    end
+
+    def filter! *a
+      replace filter a
+    end
+
+    Hash.send :include, self
+  end
+
+  module Helpers
+    def extract_options args
+      opts = if args[-1].respond_to? :to_hash
+               args.pop
+             else
+               {}
+             end
+      flags = args.reverse.take_while {|x| x.is_a? Symbol }
+      flags.each {|x| opts[x] = true }
+      args.replace args[0 .. (-1-flags.size)]
+      opts
+    end
+  end
+
   class Breakpoint
-    def initialize opts
-      @once = opts[:once]
+    include Helpers
+
+    def resolve_coarse x
+      case x
+      when Module
+        {:class => x}
+      when String,Regexp
+        {:file => x}
+      end
+    end
+
+    def resolve_fine x
+      case x
+      when Symbol
+        {:method => x}
+      when Integer
+        {:line => x} if x > 0
+      end
+    end
+      
+    def resolve_at x
+      a,b = x
+      if b.nil?
+        resolve_coarse(a) || resolve_fine(a) || {}
+      else
+        (resolve_coarse(a) ||
+         (!a.nil? && {:object => a}) ||
+         {}).merge (resolve_fine(b) || {})
+      end
+    end
+
+    def initialize *args
+      @opts = extract_options args
+      @opts.augment! resolve_at @opts[:at] if @opts.key? :at
+      @opts.augment! :previous => resolve_at(@opts[:ret]) if @opts.key? :ret
+
+      if @opts.key? :raise
+        @opts.augment! :event => 'raise'
+      elsif @opts.key? :call
+        @opts.augment! resolve_at @opts[:call]
+        @opts.augment! :event => /(c-)call/
+      elsif @opts.key? :ret
+        @opts[:previous] ||= {}
+        @opts[:previous].augment! resolve_at @opts[:ret]
+        @opts[:previous].augment! :event => /(c-)return/
+      end
+
+      @opts[:method] = @opts[:method].name if
+        [Method,UnboundMethod].include? @opts[:method].class
     end
 
     def once?
-      !!@once
+      !!@opts[:once]
     end
 
-    def trigger? params
-      true
+    def trigger? ctx
+      context_match(ctx, @opts) &&
+      context_match(ctx[:previous], @opts[:previous])
     end
 
-    def to_s
-      "unconditional"
-    end
-  end
-
-  class FileLineBreakpoint < Breakpoint
-    def initialize opts
-      super
-      @file = opts[:file]
-      @file = File.expand_path @file if @file.respond_to? :to_str
-      @line = opts[:line].to_i
-    end
-
-    def trigger? params
-      params[:line] == @line &&
-      params[:event] == 'line' &&
-      @file === params[:file]
+    def context_match ctx, opts
+      #puts [ctx,opts].inspect
+      return false unless !ctx.nil? #and
+      return true if opts.nil? #or
+      return false unless (opts[:event].nil? || opts[:event] === ctx[:event]) #and
+      return false unless (opts[:method].nil? || opts[:method] === ctx[:ident]) #and
+      return false unless (opts[:object].nil? || ctx[:binding].eval('self') == opts[:object]) #and
+      return false unless (opts[:class].nil? || ctx[:class] == opts[:class]) #and
+      return false unless (opts[:file].nil? || opts[:file] === ctx[:file]) #and
+      return false unless (opts[:line].nil? || ctx[:line] == opts[:line]) #and
+      return false unless (opts[:if].nil? || (ctx[:binding].eval opts[:if] rescue nil))
     end
 
     def to_s
-      "line #{@line} of #{@file}"
-    end
-  end
-
-  class MethodCallBreakpoint < Breakpoint
-    def initialize opts
-      super
-      @class = opts[:class]
-      @class = @class.class unless @class.is_a? Module
-      @method = opts[:method].to_s.intern
+      @opts.select {|k,v|
+        [:class,:object,:method,:file,:line,:if,:event].include? k
+      }.map {|k,v|
+        "#{k}=#{v}"
+      }.join ' '
     end
 
-    def trigger? params
-      params[:ident] == @method &&
-      params[:event] =~ /^(c-)?call$/ &&
-      params[:class] == @class
-    end
-
-    def to_s
-      "call to #{@class}##{@method}"
-    end
-  end
-
-  class ExceptionBreakpoint < Breakpoint
-    def trigger? params
-      params[:event] == 'raise'
-    end
-
-    def to_s
-      "all exceptions"
-    end
-  end
-
-  class ConditionalBreakpoint < Breakpoint
-    def initialize opts
-      super
-      @pred = opts[:pred].to_s
-    end
-
-    def trigger? params
-      params[:binding].eval @pred rescue nil
-    end
-
-    def to_s
-      "if #{@pred}"
-    end
-  end
+  end # class Breakpoint
 
   class Debugger
+    include Helpers
 
     def errmsg msg="Generic error"
       STDERR.puts "\e[31;1m#{msg}\e[0m"
     end
 
     def initialize &block
+      @conf = {}
+      @conf[:width] = (ENV['COLUMNS']||78).to_i
       @breakpoints = []
+      @stack = []
+      @running = false
+      @finished = true
       debug &block if block
+    end
+
+    @trace_functions ||= []
+    @tracing ||= false
+
+    class << self
+      attr_reader :trace_functions
+
+      def add_trace_func func
+        @trace_functions << func
+        set_trace_func method(:meta_trace_function).to_proc unless @tracing
+        @tracing = true
+      end
+
+      def remove_trace_func func
+        tf = @trace_functions.delete func
+        if @trace_functions.empty? && @tracing
+          set_trace_func nil
+          @tracing = false
+        end
+        tf
+      end
+
+      def clear_trace_funcs
+        set_trace_func nil
+        @trace_functions.clear
+        @tracing = false
+      end
+
+      def meta_trace_function *a
+        @trace_functions.each {|tf| tf[*a] }
+      end
+    end
+
+    def trace_function *a
+      @context[:previous] = nil if @context
+      @context = { :previous => @context,
+                   :event => a[0],
+                   :file => a[1],
+                   :line => a[2],
+                   :ident => a[3],
+                   :binding => a[4],
+                   :class => a[5] }
+
+      if @stack.empty? || (@context[:previous] && @context[:previous][:event] =~ /^(c-)call$/)
+        @stack.push @context
+      else
+        @stack.pop if !@stack.empty? && (@context[:previous] && @context[:previous][:event] =~ /^(c-)return$/)
+        # note @stack might be empty here.. superfluous returns happen.. I don't know why
+        @stack[@stack.size] = @context
+      end
+
+      @running = true
+
+      #puts a.inspect; return
+
+      @breakpoints.each {|bp|
+        if bp.trigger? @context
+          @current_bp = bp
+          @breakpoints.delete bp if bp.once?
+          STDERR.print "\n\e[1;37;41m Breakpoint: #{bp} \e[0m\n"
+          self.class.remove_trace_func @trace_function unless Fiber.yield @context
+        end
+      }
     end
 
     def debug &block
       raise ArgumentError.new "block required" unless block
-      if running?
+      if !finished?
         errmsg "Debugger already running"
       else
+        @finished = false
         @fiber = Fiber.new {
+          @trace_function = method(:trace_function).to_proc
           begin
-            set_trace_func proc { |*a|
-              @context = { :event => a[0],
-                           :file => a[1],
-                           :line => a[2],
-                           :ident => a[3],
-                           :binding => a[4],
-                           :class => a[5] }
-
-              @breakpoints.each {|bp|
-                if bp.trigger? @context
-                  @current_bp = bp
-                  @breakpoints.delete bp if bp.once?
-                  STDERR.print "\n\e[1;37;41m Breakpoint #{bp} \e[0m\n"
-                  set_trace_func nil unless Fiber.yield @context
-                end
-              }
-            }
+            self.class.add_trace_func @trace_function
             block[]
           ensure
-            set_trace_func nil
-            @running = false
+            self.class.remove_trace_func @trace_function
+            cleanup
           end
         }
-        @running = true
       end
+      self
     end # def debug
 
     attr_reader :context
+    def backtrace; @stack; end
 
     def run dbg=true, &block
-      self.debug &block if block
+      if block
+        unless finished?
+          errmsg "Debugger already running"
+          return
+        end
+        debug &block
+      elsif finished?
+        errmsg "Debugger not running and no block given"
+        return
+      end
 
-      if running?
+      unless finished?
         begin
           @fiber.resume dbg
         rescue FiberError
-          @running = false
+          cleanup
           errmsg "Debugger stopped abnormally"
         end
-      else
-        errmsg "Debugger not running and no block given"
+        self
       end
+    end
+
+    def cleanup
+      @running = false
+      @finished = true
+      @context = nil
+      @stack.clear
     end
 
     def running?
-      @running
+      !!@running
+    end
+
+    def finished?
+      !!@finished
+    end
+
+    def assert_running
+      running? or errmsg "Debugger not running" or nil
+    end
+
+    def assert_not_finished
+      !finished? or errmsg "Debugger not running" or nil
     end
 
     def finish
-      run false
+      run false if assert_not_finished
     end
 
     def eval expr
-      errmsg "Debugger not running" unless running?
-      @context && @context[:binding].eval(expr)
+      @context[:binding].eval(expr) if assert_running
     end
 
-    def break once=false
-      @breakpoints << Breakpoint.new(:once => once)
+    def bp *args
+      args.push :file => @context[:file], :line => @context[:line] if
+        args.empty? && running?
+      @breakpoints << Breakpoint.new(*args)
+      self
     end
 
-    def break_if pred, once=false
-      @breakpoints << ConditionalBreakpoint.new(:pred => pred, :once => once)
+    def bpif pred, *args
+      opts = extract_options args
+      bp opts.augment :if => pred
     end
 
-    def break_at a, b, once=false
-      if a.is_a?(Regexp) || a.is_a?(String)
-        @breakpoints << FileLineBreakpoint.new(:file => a, :line => b, :once => once)
-      else
-        @breakpoints << MethodCallBreakpoint.new(:class => a, :method => b, :once => once)
-      end
+    def bpat a=nil, b=nil, *args
+      opts = extract_options args
+      bp opts.augment :at => [a,b]
     end
 
-    def break_ex once=false
-      @breakpoints << ExceptionBreakpoint.new(:once => once)
+    def bpret a=nil, b=nil, *args
+      opts = extract_options args
+      bp opts.augment :ret => [a,b]
+    end
+
+    def bpex *args
+      opts = extract_options args
+      bp opts.augment :raise => true
     end
 
     def clearbp i=nil
@@ -181,6 +311,7 @@ module Debuggerer
       else
         @breakpoints.clear
       end
+      self
     end
 
     def rmbp x
@@ -188,36 +319,95 @@ module Debuggerer
         @breakpoints.delete_at x
       elsif x.is_a? Breakpoint
         @breakpoints.delete x
-      end        
+      end
+      self
     end
 
     def lsbp
       @breakpoints.each_with_index do |bp,i|
         puts "#{i.to_s.ljust 2}   #{bp}" + (bp.once? ? ' (once)' : '')
       end
+      self
+    end
+
+    EVENT_MNEMONICS = { 'line' => '-',
+                        'call' => '>',
+                        'return' => '<',
+                        'c-call' => '}',
+                        'c-return' => '{',
+                        'raise' => '!' }
+
+    def format_context ctx
+      #inspect_width = @conf[:width] - 49
+      inspect_width = @conf[:width] - 25
+      inspect_width = 0 if inspect_width < 0
+      # "\e[36;1m%4s \e[33;1m%-16.16s \e[37;1m%s \e[35;1m%-24.24s \e[32;1m%.#{inspect_width}s\e[0m" % [
+      "\e[36;1m%4s \e[33;1m%-16.16s \e[37;1m%s \e[35;1m%.#{inspect_width}s\e[0m" % [
+        ctx[:line].to_s,
+        File.basename(ctx[:file]),
+        EVENT_MNEMONICS[ctx[:event]],
+        "#{ctx[:class]}##{ctx[:ident]}"
+        # ctx[:binding].eval('self.inspect')
+      ]
+    end
+
+    def pos
+      STDERR.puts format_context @context if assert_running
+      self
+    end
+
+    def inspect
+      if running?
+        format_context @context
+      else
+        super
+      end
+    end
+
+    def color_inspect
+      if running?
+        format_context @context
+      else
+        super
+      end
+    end
+
+    def stack
+      @stack.each {|ctx| STDERR.puts format_context ctx } if assert_running
+      self
     end
 
     def step &block
-      self.break true
+      bp :once
       run &block
     end
 
-    def run_until pred, &block
-      break_if pred, true
+    def ret a=nil, b=nil, &block
+      bpret a, b, :once
       run &block
     end
 
-    def run_to a, b, &block
-      break_at a, b, true
+    define_method :until do |pred, &block|
+      bpif pred, :once
       run &block
     end
 
-    def run_ex &block
-      break_ex true
+    define_method :while do |pred, &block|
+      bpif "!(#{pred})", :once
       run &block
     end
 
-  end # class Debugger
+    def to a=nil, b=nil, &block
+      bpat a, b, :once
+      run &block
+    end
+
+    def ex &block
+      bpex :once
+      run &block
+    end
+
+  end # class Debuggerer
 
   SOURCE_CACHE = {}
 
@@ -248,23 +438,6 @@ module Debuggerer
       @source = !!@conf[:source]
       @width = @conf[:width] || (ENV["COLUMNS"] || 78).to_i
 
-=begin
-      fields = @conf[:trace_fields].dup
-      fields.delete {|x| x[0] == :watch } unless @conf[:watch]
-      fixed,flexi = fields.reduce([]) {|a,x|
-        if x[0] != :space || a.last && a.last[0] != :space && x != fields.last
-          a << x
-        elsif a.last && a.last[0] == :space
-          a[-1] = x if a.last[1] < x[1]
-        end
-      }.partition {|x| x[1].is_a? Integer }
-
-      spill = []
-      while !fixed.empty? @width < (fixed_sum = fixed.sum {|x| x[1] })
-        spill << fixed.delete fixed.max_by {|x| x[1] }
-      end
-=end      
-
       @last_file = @watch_seen = @watch_last_value = nil
       @state = :pre
 
@@ -280,7 +453,11 @@ module Debuggerer
     attr_reader :return_value
 
     define_method :trace_function do |event, file, line, ident, bind, klass|
-      #puts [event,file,line,ident,bind,klass].inspect
+      if @conf[:raw]
+        puts [event,file,line,ident,bind,klass].inspect
+        return
+      end
+
       case @state
       when :pre
         return
@@ -383,25 +560,15 @@ module Debuggerer
   class << self
 
     def debug &block
-      Debugger.new block
+      Debugger.new &block
     end
 
-    def run_until pred, &block
-      dbg = Debugger.new &block
-      dbg.run_until pred
-      dbg
-    end
-
-    def run_to a, b, &block
-      dbg = Debugger.new &block
-      dbg.run_to a, b
-      dbg
-    end
-
-    def run_ex &block
-      dbg = Debugger.new &block
-      dbg.run_ex
-      dbg
+    [:to,:while,:until,:ex].each do |meth|
+      define_method meth do |*a, &block|
+        dbg = Debugger.new &block
+        dbg.send meth, *a
+        dbg
+      end
     end
 
     def trace opts={}, &block
@@ -425,5 +592,32 @@ module Debuggerer
       trace opts.merge(:watch => watch, :changes => true), &block
     end
 
+    def install
+    end
   end # class << self
+
+  module ToplevelCommands
+    def run_to *a, &block
+      Debuggerer.to *a, &block
+    end
+
+    def run_while *a, &block
+      Debuggerer.while *a, &block
+    end
+
+    def run_until *a, &block
+      Debuggerer.while *a, &block
+    end
+
+    def run_ex *a, &block
+      Debuggerer.ex *a, &block
+    end
+  end
+
+  module ModuleCommands
+    def run_to *a, &block
+      Debuggerer.to self, *a, &block
+    end
+  end
 end # module Debuggerer
+
