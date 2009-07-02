@@ -22,6 +22,15 @@ module Debuggerer
     Hash.send :include, self
   end
 
+  EVENT_MNEMONICS = { 'line' => '-',
+                      'call' => '>',
+                      'return' => '<',
+                      'c-call' => '}',
+                      'c-return' => '{',
+                      'class' => '[',
+                      'end' => ']',
+                      'raise' => '!' }
+
   module Helpers
     def extract_options args
       opts = if args[-1].respond_to? :to_hash
@@ -174,7 +183,8 @@ module Debuggerer
       end
 
       def meta_trace_function *a
-        @trace_functions.each {|tf| tf[*a] }
+        # The lambda protects against a YARV bug
+        lambda { @trace_functions.each {|tf| tf[*a] } }[]
       end
     end
 
@@ -339,13 +349,6 @@ module Debuggerer
       self
     end
 
-    EVENT_MNEMONICS = { 'line' => '-',
-                        'call' => '>',
-                        'return' => '<',
-                        'c-call' => '}',
-                        'c-return' => '{',
-                        'raise' => '!' }
-
     def format_context ctx
       #inspect_width = @conf[:width] - 49
       inspect_width = @conf[:width] - 25
@@ -416,7 +419,7 @@ module Debuggerer
       run &block
     end
 
-  end # class Debuggerer
+  end # class Debugger
 
   SOURCE_CACHE = {}
 
@@ -434,7 +437,8 @@ module Debuggerer
         :file => '33;1',
         :line => '36;1',
         :source => '37;1',
-        :watch => '32;1'
+        :watch => '32;1',
+        :event => '35;1'
       },
       :source => true
     }
@@ -451,7 +455,7 @@ module Debuggerer
       @state = :pre
 
       begin
-        set_trace_func method(:trace_function).to_proc
+        set_trace_func proc {|*a| begin; self.trace_function(*a); rescue Exception; end }
         @state = :almost
         @return_value = yield
       ensure
@@ -462,52 +466,54 @@ module Debuggerer
     attr_reader :return_value
 
     define_method :trace_function do |event, file, line, ident, bind, klass|
-      if @conf[:raw]
-        puts [event,file,line,ident,bind,klass].inspect
-        return
-      end
+      # WARNING: do not use an explicit return in the outermost scope of this method!
+      # The VM does NOT like it, for whatever reason. The lambda effectively solves the problem.
+      lambda do
+        if @conf[:raw]
+          STDERR.puts [event,file,line,ident,bind,klass].inspect
+        else
+          case @state
+          when :almost
+            unless klass == Tracer && ident == :initialize
+              @state = :in
+              redo # <3 redo
+            end
+          when :in
+            if klass == Tracer && ident == :initialize && bind.eval('self') == self
+              @state = :out
+            elsif (!@condition || (bind.eval(@condition) rescue nil))
+              # puts [event,file,line,ident,bind,klass].inspect
 
-      case @state
-      when :pre
-        return
-      when :almost
-        unless klass == Tracer && ident == :initialize
-          @state = :in
-          redo # <3 redo
-        end
-      when :in
-        if klass == Tracer && ident == :initialize && bind.eval('self') == self
-          @state = :out
-        elsif event == 'line' && (!@condition || (bind.eval(@condition) rescue nil))
-          # puts [event,file,line,ident,bind,klass].inspect
+              watch_show = if @watch
+                             begin
+                               watch_value = bind.eval @watch
+                               watch_defined = true
+                               watch_changed = !@watch_seen || watch_value != @watch_last_value
+                               @watch_seen = true
+                               @watch_last_value = watch_value
+                               !@changes || watch_changed
+                             rescue
+                               watch_defined = watch_changed = false
+                             end
+                           end
 
-          watch_show = if @watch
-                         begin
-                           watch_value = bind.eval @watch
-                           watch_defined = true
-                           watch_changed = !@watch_seen || watch_value != @watch_last_value
-                           @watch_seen = true
-                           @watch_last_value = watch_value
-                           !@changes || watch_changed
-                         rescue
-                           watch_defined = watch_changed = false
-                         end
-                       end
+              if !@watch || watch_show
+                STDERR.puts(
+                  format_trace_line :event => event,
+                                    :file => file,
+                                    :line => line,
+                                    :ident => ident,
+                                    :class => klass,
+                                    :binding => bind,
+                                    :watch => watch_show && watch_value,
+                                    :new_file => @last_file != file )
+                @last_file = file
+              end
 
-          if !@watch || watch_show
-            STDERR.puts(
-              format_trace_line :event => event,
-                                :file => file,
-                                :line => line,
-                                :ident => ident,
-                                :class => klass,
-                                :watch => watch_show && watch_value,
-                                :new_file => @last_file != file )
-            @last_file = file
-          end
-
-        end # if klass == Tracer ...
-      end # case @state
+            end # if klass == Tracer ...
+          end # case @state
+        end # if @conf[:raw]
+      end.call # lambda
     end # def trace_function
 
     def format_trace_line params
@@ -533,7 +539,7 @@ module Debuggerer
                  end
       end
 
-      src_s ||= "#{params[:event]} #{params[:class]}:#{params[:ident]}"
+      src_s ||= "#{params[:class]}:#{params[:ident]} #{params[:binding].inspect}"
       src_width = @width - line_s.size
 
       format = if watch
@@ -556,9 +562,11 @@ module Debuggerer
         src_s = src_s.ljust src_width
       end
 
+      event = EVENT_MNEMONICS[params[:event]] || ' '
+
       output = ''
       output << "\e[#{params[:colors][:file]}mIn #{file}:\n" if params[:new_file]
-      output << "\e[#{params[:colors][:line]}m#{line_s}\e[#{params[:colors][:source]}m#{src_s}"
+      output << "\e[#{params[:colors][:line]}m#{line_s} \e[#{params[:colors][:event]}m#{event} \e[#{params[:colors][:source]}m#{src_s}"
       output << "\n" if format == :multiline
       output << "\e[#{params[:colors][:watch]}m#{watch}\e[0m" if format != :nowatch
       return output
@@ -594,6 +602,14 @@ module Debuggerer
     def trace opts={}, &block
       tr = Tracer.new opts, &block
       tr.return_value
+    end
+
+    def trace_meta opts={}, &block
+      trace opts.augment(:source => false), &block
+    end
+
+    def trace_raw opts={}, &block
+      trace opts.augment(:raw => true), &block
     end
 
     def trace_if pred, opts={}, &block
@@ -657,6 +673,8 @@ module Debuggerer
 
     [:debug,
      :trace,
+     :trace_meta,
+     :trace_raw,
      :trace_if,
      :trace_in,
      :watch,
