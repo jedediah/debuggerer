@@ -1,4 +1,9 @@
+
 The Debuggerer is a Ruby debugger that can be used quickly and conveniently from within IRB.
+
+== Project Status 2009-10-01
+Many features don't work and set_trace_func has proved unstable. Now that ruby-debug
+has been ported to 1.9, Debuggerer will switch to that for underlying implementation.
 
 == Has this ever happened to you?
 
